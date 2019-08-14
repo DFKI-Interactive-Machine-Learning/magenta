@@ -287,7 +287,9 @@ def train(sess, model, eval_model, train_set, valid_set, test_set):
     curr_kl_weight = (hps.kl_weight - (hps.kl_weight - hps.kl_weight_start) *
                       (hps.kl_decay_rate)**step)
 
-    _, x, s = train_set.random_batch()
+    # _, x, s = train_set.random_batch()
+    _, x, s = train_set.stroke_batch()
+
     feed = {
         model.input_data: x,
         model.sequence_lengths: s,

@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import random
+from queue import Queue
 
 import numpy as np
 
@@ -210,6 +211,7 @@ class DataLoader(object):
                random_scale_factor=0.0,
                augment_stroke_prob=0.0,
                limit=1000):
+    self.stroke_batch_queue = Queue()
     self.batch_size = batch_size  # minibatch size
     self.max_seq_length = max_seq_length  # N_max in sketch-rnn paper
     self.scale_factor = scale_factor  # divide offsets by this factor
@@ -224,7 +226,12 @@ class DataLoader(object):
     self.preprocess(strokes)
 
   def preprocess(self, strokes):
-    """Remove entries from strokes having > max_seq_length points."""
+    """
+    * Remove entries from strokes having > max_seq_length points.
+    * Scale x and y deltas with normalization factor
+    * Sort sketches by total amount of dots -> self.strokes
+    * Compute number of batches -> self.num_batches
+    """
     raw_data = []
     seq_len = []
     count_data = 0
@@ -305,6 +312,100 @@ class DataLoader(object):
     """Return a randomised portion of the training data."""
     idx = np.random.permutation(range(0, len(self.strokes)))[0:self.batch_size]
     return self._get_batch_from_indices(idx)
+
+  def _get_sketches_from_indices(self, indices):
+    """[DFKI] Given a list of indices, return the potentially augmented sketches."""
+    sketches = []
+    num_strokes = []
+    for idx in range(len(indices)):
+      i = indices[idx]
+      data = self.random_scale(self.strokes[i])
+      data_copy = np.copy(data)
+      if self.augment_stroke_prob > 0:
+        data_copy = augment_strokes(data_copy, self.augment_stroke_prob)
+      sketches.append(data_copy)
+      length = np.sum(data_copy[:, 2])
+      num_strokes.append(length)
+    num_strokes = np.array(num_strokes, dtype=int)
+
+    return sketches, num_strokes
+
+  def _split_sketch(self, data):
+    """[DFKI] splits a sketch in stroke-3 format into individual pen strokes (as sub-sketches)"""
+    pen_stroke_bounds = np.where(data[:, 2] == 1)[0] + 1  # last dot of a stroke is marked with one
+    pen_strokes = np.split(data, pen_stroke_bounds[:-1])
+    return pen_strokes
+
+  def _pad_stroke_batch(self, sketch_strokes):
+    """
+    [DFKI] Build k padded mini-batches in stroke-5 format, k = max(number of strokes per sketch).
+      - first mini-batch includes the first strokes of all sketches with preceding s_0=100;
+      - pad with 010, if there is a subsequent stroke
+      - pad with 001, if there is no subsequent stroke
+      - further mini-batches include the 2nd, 3rd, ..., jth stroke of each sketch, up to k
+      - TODO: (?do not?) add s_0 for non-leading strokes: the x, y deltas might be lost -> test it
+      - if there is no further stroke for some sketches, but k is not reached: add 001 vectors to the batch
+    """
+    max_num_strokes = max([len(sketch) for sketch in sketch_strokes])
+    max_stroke_len = self.max_seq_length  # TODO: compute global max_stroke_length
+    # max_seq_length is also an upper bound for stroke length. However, it might be more efficient to compute
+    # a max_stroke_length over all_strokes (see sketch_rnn_train.py) to reduce the sequence length within batches.
+
+    batches = []
+    for j in range(0, max_num_strokes):
+      result = np.zeros((self.batch_size, max_stroke_len + 1, 5), dtype=float)
+      seq_len = []
+
+      for i in range(0, self.batch_size):
+        # if there is no further stroke for sketch i
+        if len(sketch_strokes[i]) <= j:
+          result[i, :, 4] = 1  # pad with [00001]s, see [Kaiyrbekov & Sezgin 2019]
+          seq_len.append(0)
+        # if there is at least one further stroke for sketch i
+        else:
+          l = len(sketch_strokes[i][j])
+          seq_len.append(l)
+          assert l <= max_stroke_len
+          # set stroke-5 data
+          result[i, 0:l, 0:2] = sketch_strokes[i][j][:, 0:2]
+          result[i, 0:l, 3] = sketch_strokes[i][j][:, 2]
+          result[i, 0:l, 2] = 1 - result[i, 0:l, 3]
+
+          # pad stroke depending on their position in the sketch;
+          is_last_stroke = len(sketch_strokes[i]) <= j + 1
+          if is_last_stroke:
+            result[i, l:, 4] = 1  # set end of sketch bit
+          else:
+            result[i, l:, 3] = 1  # set end of stroke bit
+
+          # add preceding s_0 for first stroke of the sketch only
+          if j == 0:
+            # shift stroke signal by 1
+            result[i, 1:, :] = result[i, :-1, :]
+            # set first signal sample to s_0
+            result[i, 0, :] = 0
+            result[i, 0, 2] = self.start_stroke_token[2]  # setting S_0 from paper.
+            result[i, 0, 3] = self.start_stroke_token[3]
+            result[i, 0, 4] = self.start_stroke_token[4]
+
+      batches.append((None, result, seq_len))
+    return batches
+
+  def stroke_batch(self):
+    """[DFKI] Return a mini-batch from the training data as described in [Kaiyrbekov and Sezgin 2019] section 3.1."""
+
+    if self.stroke_batch_queue.empty():
+      # Fill the queue with the next set of batches as described in [Kaiyrbekov and Sezgin 2019] section 3.1.
+
+      # Randomly select sketches from the training data (n=batch_size)
+      idx = np.random.permutation(range(0, len(self.strokes)))[0:self.batch_size]
+      sketches, num_strokes = self._get_sketches_from_indices(idx)
+      # Split all sketches into strokes
+      sketch_strokes = [self._split_sketch(sketch) for sketch in sketches]
+      for batch in self._pad_stroke_batch(sketch_strokes):
+        self.stroke_batch_queue.put(batch, block=False)
+    assert not self.stroke_batch_queue.empty()
+    return self.stroke_batch_queue.get(block=False)
 
   def get_batch(self, idx):
     """Get the idx'th batch from the dataset."""
