@@ -216,22 +216,30 @@ def load_dataset(data_dir, model_params, inference_mode=False):
 
 
 def evaluate_model(sess, model, data_set):
-  """Returns the average weighted cost, reconstruction cost and KL cost."""
+  """[InkRNN] Returns the average weighted cost, reconstruction cost and KL cost; aggregates stroke-wise averages."""
   total_cost = 0.0
   total_r_cost = 0.0
   total_kl_cost = 0.0
-  for batch in range(data_set.num_batches):
-    unused_orig_x, x, s = data_set.get_batch(batch)
-    feed = {model.input_data: x, model.sequence_lengths: s}
-    (cost, r_cost,
-     kl_cost) = sess.run([model.cost, model.r_cost, model.kl_cost], feed)
-    total_cost += cost
-    total_r_cost += r_cost
-    total_kl_cost += kl_cost
+  # changed to a stroke-wise cost computation (in comparison to SketchRNN)
+  for batch_idx in range(data_set.num_batches):
+    sketch_r_cost = []
+    sketch_cost = []
+    sketch_kl_cost = []
+    for batch in data_set.get_stroke_batches(batch_idx):
+      _, x, s = batch
+      feed = {model.input_data: x, model.sequence_lengths: s}
+      (cost, r_cost, kl_cost) = \
+        sess.run([model.cost, model.r_cost, model.kl_cost], feed)
+      sketch_cost.append(cost)
+      sketch_r_cost.append(r_cost)
+      sketch_kl_cost.append(kl_cost)
+    total_cost += sum(sketch_cost) / len(sketch_cost)
+    total_r_cost += sum(sketch_r_cost) / len(sketch_r_cost)
+    total_kl_cost += sum(sketch_kl_cost) / len(sketch_kl_cost)
 
-  total_cost /= (data_set.num_batches)
-  total_r_cost /= (data_set.num_batches)
-  total_kl_cost /= (data_set.num_batches)
+  total_cost /= data_set.num_batches
+  total_r_cost /= data_set.num_batches
+  total_kl_cost /= data_set.num_batches
   return (total_cost, total_r_cost, total_kl_cost)
 
 
@@ -287,8 +295,7 @@ def train(sess, model, eval_model, train_set, valid_set, test_set):
     curr_kl_weight = (hps.kl_weight - (hps.kl_weight - hps.kl_weight_start) *
                       (hps.kl_decay_rate)**step)
 
-    # _, x, s = train_set.random_batch()
-    _, x, s = train_set.stroke_batch()
+    _, x, s = train_set.random_stroke_batch()  # use InkRNN version of random_batch()
 
     feed = {
         model.input_data: x,

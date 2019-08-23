@@ -190,14 +190,26 @@ def to_big_strokes(stroke, max_len=250):
   return result
 
 
-def get_max_len(strokes):
-  """Return the maximum length of an array of strokes."""
+def get_max_len(sketches):
+  """[InkRNN] Return the maximum stroke length within an array of sketches."""
   max_len = 0
-  for stroke in strokes:
-    ml = len(stroke)
+  for sketch in sketches:
+    ml = get_max_stroke_len(sketch)
     if ml > max_len:
       max_len = ml
   return max_len
+
+
+def get_max_stroke_len(sketch):
+  """[InkRNN] Return the maximum stroke length of a single sketch."""
+  return max([len(stroke) for stroke in split_sketch(sketch)])
+
+
+def split_sketch(data):
+  """[InkRNN] splits a sketch in stroke-3 format into individual pen strokes (as sub-sketches)"""
+  pen_stroke_bounds = np.where(data[:, 2] == 1)[0] + 1  # last dot of a stroke is marked with one
+  pen_strokes = np.split(data, pen_stroke_bounds[:-1])
+  return pen_strokes
 
 
 class DataLoader(object):
@@ -225,28 +237,27 @@ class DataLoader(object):
     # sorted by size)
     self.preprocess(strokes)
 
-  def preprocess(self, strokes):
+  def preprocess(self, sketches):
     """
     * Remove entries from strokes having > max_seq_length points.
     * Scale x and y deltas with normalization factor
     * Sort sketches by total amount of dots -> self.strokes
-    * Compute number of batches -> self.num_batches
     """
     raw_data = []
     seq_len = []
     count_data = 0
 
-    for i in range(len(strokes)):
-      data = strokes[i]
-      if len(data) <= (self.max_seq_length):
+    for i in range(len(sketches)):
+      sketch = sketches[i]
+      if get_max_stroke_len(sketch) <= (self.max_seq_length):  # len(sketch) cannot be used for InkRNN
         count_data += 1
         # removes large gaps from the data
-        data = np.minimum(data, self.limit)
-        data = np.maximum(data, -self.limit)
-        data = np.array(data, dtype=np.float32)
-        data[:, 0:2] /= self.scale_factor
-        raw_data.append(data)
-        seq_len.append(len(data))
+        sketch = np.minimum(sketch, self.limit)
+        sketch = np.maximum(sketch, -self.limit)
+        sketch = np.array(sketch, dtype=np.float32)
+        sketch[:, 0:2] /= self.scale_factor
+        raw_data.append(sketch)
+        seq_len.append(len(sketch))
     seq_len = np.array(seq_len)  # nstrokes for each sketch
     idx = np.argsort(seq_len)
     self.strokes = []
@@ -275,7 +286,7 @@ class DataLoader(object):
     """Calculate the normalizing factor explained in appendix of sketch-rnn."""
     data = []
     for i in range(len(self.strokes)):
-      if len(self.strokes[i]) > self.max_seq_length:
+      if get_max_stroke_len(self.strokes[i]) > self.max_seq_length:  # len(self.strokes[i]) cannot be used with InkRNN
         continue
       for j in range(len(self.strokes[i])):
         data.append(self.strokes[i][j, 0])
@@ -310,11 +321,12 @@ class DataLoader(object):
 
   def random_batch(self):
     """Return a randomised portion of the training data."""
+    raise NotImplementedError("This is the SketchRNN batch generation which is not supported/tested in this version.")
     idx = np.random.permutation(range(0, len(self.strokes)))[0:self.batch_size]
     return self._get_batch_from_indices(idx)
 
   def _get_sketches_from_indices(self, indices):
-    """[DFKI] Given a list of indices, return the potentially augmented sketches."""
+    """[InkRNN] Given a list of indices, return the potentially augmented sketches."""
     sketches = []
     num_strokes = []
     for idx in range(len(indices)):
@@ -330,15 +342,9 @@ class DataLoader(object):
 
     return sketches, num_strokes
 
-  def _split_sketch(self, data):
-    """[DFKI] splits a sketch in stroke-3 format into individual pen strokes (as sub-sketches)"""
-    pen_stroke_bounds = np.where(data[:, 2] == 1)[0] + 1  # last dot of a stroke is marked with one
-    pen_strokes = np.split(data, pen_stroke_bounds[:-1])
-    return pen_strokes
-
-  def _pad_stroke_batch(self, sketch_strokes):
+  def pad_stroke_batch(self, sketch_strokes):
     """
-    [DFKI] Build k padded mini-batches in stroke-5 format, k = max(number of strokes per sketch).
+    [InkRNN] Build k padded mini-batches in stroke-5 format, k = max(number of strokes per sketch).
       - first mini-batch includes the first strokes of all sketches with preceding s_0=100;
       - pad with 010, if there is a subsequent stroke
       - pad with 001, if there is no subsequent stroke
@@ -347,13 +353,10 @@ class DataLoader(object):
       - if there is no further stroke for some sketches, but k is not reached: add 001 vectors to the batch
     """
     max_num_strokes = max([len(sketch) for sketch in sketch_strokes])
-    max_stroke_len = self.max_seq_length  # TODO: compute global max_stroke_length
-    # max_seq_length is also an upper bound for stroke length. However, it might be more efficient to compute
-    # a max_stroke_length over all_strokes (see sketch_rnn_train.py) to reduce the sequence length within batches.
 
     batches = []
     for j in range(0, max_num_strokes):
-      result = np.zeros((self.batch_size, max_stroke_len + 1, 5), dtype=float)
+      result = np.zeros((self.batch_size, self.max_seq_length + 1, 5), dtype=float)
       seq_len = []
 
       for i in range(0, self.batch_size):
@@ -365,7 +368,7 @@ class DataLoader(object):
         else:
           l = len(sketch_strokes[i][j])
           seq_len.append(l)
-          assert l <= max_stroke_len
+          assert l <= self.max_seq_length
           # set stroke-5 data
           result[i, 0:l, 0:2] = sketch_strokes[i][j][:, 0:2]
           result[i, 0:l, 3] = sketch_strokes[i][j][:, 2]
@@ -378,8 +381,9 @@ class DataLoader(object):
           else:
             result[i, l:, 3] = 1  # set end of stroke bit
 
-          # add preceding s_0 for first stroke of the sketch only
-          if j == 0:
+          # s_0 prefix policy: first stroke only <-> all stokes
+          all_strokes_policy = True
+          if j == 0 or all_strokes_policy:
             # shift stroke signal by 1
             result[i, 1:, :] = result[i, :-1, :]
             # set first signal sample to s_0
@@ -387,30 +391,43 @@ class DataLoader(object):
             result[i, 0, 2] = self.start_stroke_token[2]  # setting S_0 from paper.
             result[i, 0, 3] = self.start_stroke_token[3]
             result[i, 0, 4] = self.start_stroke_token[4]
+            # increase sequence length by one, due to prepended s_0
+            seq_len[-1] += 1
 
       batches.append((None, result, seq_len))
     return batches
 
-  def stroke_batch(self):
-    """[DFKI] Return a mini-batch from the training data as described in [Kaiyrbekov and Sezgin 2019] section 3.1."""
+  def random_stroke_batch(self):
+    """[InkRNN] Return a mini-batch from the training data as described in [Kaiyrbekov and Sezgin 2019] section 3.1."""
 
     if self.stroke_batch_queue.empty():
       # Fill the queue with the next set of batches as described in [Kaiyrbekov and Sezgin 2019] section 3.1.
 
-      # Randomly select sketches from the training data (n=batch_size)
+      # Randomly select n sketches from the training data (n=batch_size)
       idx = np.random.permutation(range(0, len(self.strokes)))[0:self.batch_size]
       sketches, num_strokes = self._get_sketches_from_indices(idx)
       # Split all sketches into strokes
-      sketch_strokes = [self._split_sketch(sketch) for sketch in sketches]
-      for batch in self._pad_stroke_batch(sketch_strokes):
+      sketch_strokes = [split_sketch(sketch) for sketch in sketches]
+      for batch in self.pad_stroke_batch(sketch_strokes):
         self.stroke_batch_queue.put(batch, block=False)
     assert not self.stroke_batch_queue.empty()
     return self.stroke_batch_queue.get(block=False)
 
+  def get_stroke_batches(self, idx):
+    """[InkRNN] Generate stroke-wise mini-batches using all available sketches"""
+    # Select n sketches for the idx_th batch (n=batch_size)
+    start_idx = idx * self.batch_size
+    indices = range(start_idx, start_idx + self.batch_size)
+    sketches, num_strokes = self._get_sketches_from_indices(indices)
+    # Split all sketches into strokes
+    sketch_strokes = [split_sketch(sketch) for sketch in sketches]
+    return self.pad_stroke_batch(sketch_strokes)
+
   def get_batch(self, idx):
     """Get the idx'th batch from the dataset."""
+    raise NotImplementedError("This is the SketchRNN batch generation which is not supported/tested in this version.")
     assert idx >= 0, "idx must be non negative"
-    assert idx < self.num_batches, "idx must be less than the number of batches"
+    # assert idx < self.num_batches, "idx must be less than the number of batches"
     start_idx = idx * self.batch_size
     indices = range(start_idx, start_idx + self.batch_size)
     return self._get_batch_from_indices(indices)
