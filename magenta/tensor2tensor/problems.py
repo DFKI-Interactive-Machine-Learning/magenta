@@ -16,5 +16,6 @@
 
 # pylint: disable=unused-import
 from magenta.models import score2perf
+from magenta.models import svg_vae
 
 # pylint: enable=unused-import

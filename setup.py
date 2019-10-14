@@ -38,6 +38,11 @@ REQUIRED_PACKAGES = [
     'Pillow >= 3.4.2',
     'backports.tempfile',
     'bokeh >= 0.12.0',
+    # Temporary fix for gast issue with TF.
+    # Details:
+    # https://github.com/tensorflow/tensorflow/issues/32319
+    # https://github.com/tensorflow/tensorflow/commit/c72125bd59858ec82a9238b232bbd77c45889c5a
+    'gast == 0.2.2',
     'intervaltree >= 2.1.0',
     'joblib >= 0.12',
     'librosa >= 0.6.2',
@@ -53,20 +58,21 @@ REQUIRED_PACKAGES = [
     'scipy >= 0.18.1',
     'six >= 1.12.0',
     'sk-video',
-    'sonnet',
+    'dm-sonnet < 2.0.0',  # Sonnet 2 requires TF2.
     'sox >= 1.3.7',
     'tensorflow-datasets >= 1.0.2',
-    'tensorflow-probability >= 0.7.0rc0',
+    'tensorflow-probability == 0.7.0',
     'tensor2tensor >= 1.13.4',
     'wheel',
     'futures;python_version=="2.7"',
-    'apache-beam[gcp] >= 2.8.0;python_version=="2.7"',
+    'apache-beam[gcp] >= 2.14.0',
 ]
 
+# Magenta library is not yet TF2 compatible.
 if gpu_mode:
-  REQUIRED_PACKAGES.append('tensorflow-gpu >= 1.13.0')
+  REQUIRED_PACKAGES.append('tensorflow-gpu >= 1.14.0, < 2.0.0')
 else:
-  REQUIRED_PACKAGES.append('tensorflow >= 1.13.0')
+  REQUIRED_PACKAGES.append('tensorflow >= 1.14.0, < 2.0.0')
 
 # pylint:disable=line-too-long
 CONSOLE_SCRIPTS = [
@@ -156,12 +162,9 @@ setup(
     },
     setup_requires=['pytest-runner', 'pytest-pylint'],
     tests_require=[
-        'pytest',
-        'pytest-xdist',
+        'pytest >= 5.2.0',
+        'pytest-xdist < 1.30.0',  # 1.30 has problems working with pylint plugin
         'pylint < 2.0.0;python_version<"3"',
-        # pylint 2.3.0 and astroid 2.2.0 caused spurious errors,
-        # so lock them down to known good versions.
-        'pylint == 2.2.2;python_version>="3"',
-        'astroid == 2.0.4;python_version>="3"',
+        'pylint >= 2.4.2;python_version>="3"',
     ],
 )
